@@ -1,0 +1,10 @@
+.vscode/**
+.github/**
+scripts/**
+test/**
+docs/**
+src/**
+tsconfig.json
+gdb-ui-debug.txt
+**/*.map
+**/*.ts

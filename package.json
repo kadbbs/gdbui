@@ -1,0 +1,186 @@
+{
+  "name": "gdb-ui",
+  "displayName": "GDB UI",
+  "description": "A VS Code debug extension for launching GDB with executable-only and disassembly-first workflows.",
+  "version": "0.0.5",
+  "publisher": "local",
+  "icon": "assets/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kadbbs/gdbui.git"
+  },
+  "homepage": "https://github.com/kadbbs/gdbui",
+  "bugs": {
+    "url": "https://github.com/kadbbs/gdbui/issues"
+  },
+  "engines": {
+    "vscode": "^1.113.0"
+  },
+  "categories": [
+    "Debuggers"
+  ],
+  "keywords": [
+    "gdb",
+    "debugger",
+    "assembly",
+    "disassembly",
+    "embedded"
+  ],
+  "activationEvents": [
+    "onView:gdb-ui.sidebar",
+    "onDebug",
+    "onDebugResolve:gdbui",
+    "onCommand:gdb-ui.startDebuggingExecutable",
+    "onCommand:gdb-ui.debugFromSidebar"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "gdb-ui-sidebar",
+          "title": "GDB UI",
+          "icon": "assets/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "gdb-ui-sidebar": [
+        {
+          "type": "webview",
+          "id": "gdb-ui.sidebar",
+          "name": "GDB Debugger",
+          "icon": "assets/icon.svg",
+          "contextualTitle": "GDB UI"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "gdb-ui.openSidebar",
+        "title": "GDB UI: Open Debugger Sidebar",
+        "category": "GDB UI"
+      },
+      {
+        "command": "gdb-ui.debugFromSidebar",
+        "title": "GDB UI: Debug from Sidebar",
+        "category": "GDB UI"
+      },
+      {
+        "command": "gdb-ui.getProgramName",
+        "title": "GDB UI: Pick Program"
+      },
+      {
+        "command": "gdb-ui.startDebuggingExecutable",
+        "title": "GDB UI: Debug Executable"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "gdbui",
+        "label": "GDB UI",
+        "languages": [
+          "c",
+          "cpp",
+          "asm",
+          "plaintext"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "program",
+              "gdbPath"
+            ],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Absolute path to the executable to debug."
+              },
+              "gdbPath": {
+                "type": "string",
+                "description": "Absolute path to the GDB executable from your gdb-tools installation."
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Working directory for the debuggee."
+              },
+              "args": {
+                "type": "array",
+                "description": "Arguments passed to the debuggee.",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "stopAtEntry": {
+                "type": "boolean",
+                "description": "Break at the entry point before user code runs.",
+                "default": true
+              },
+              "disassemblyFlavor": {
+                "type": "string",
+                "enum": [
+                  "intel",
+                  "att"
+                ],
+                "description": "Preferred disassembly syntax.",
+                "default": "intel"
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "gdbui",
+            "request": "launch",
+            "name": "Launch with GDB UI",
+            "gdbPath": "/path/to/gdb-tools/bin/gdb",
+            "program": "${workspaceFolder}/a.out",
+            "cwd": "${workspaceFolder}",
+            "args": [],
+            "stopAtEntry": true,
+            "disassemblyFlavor": "intel"
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "GDB UI: Launch executable",
+            "description": "Launch an executable with a custom GDB path and enable assembly debugging.",
+            "body": {
+              "type": "gdbui",
+              "request": "launch",
+              "name": "Launch with GDB UI",
+              "gdbPath": "^\"/path/to/gdb-tools/bin/gdb\"",
+              "program": "^\"${workspaceFolder}/a.out\"",
+              "cwd": "^\"${workspaceFolder}\"",
+              "args": [],
+              "stopAtEntry": true,
+              "disassemblyFlavor": "intel"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile",
+    "package": "npx @vscode/vsce@2.15.0 package",
+    "package:pre": "npm run compile && npm run package"
+  },
+  "overrides": {
+    "cheerio": "1.0.0-rc.12"
+  },
+  "dependencies": {
+    "@vscode/debugadapter": "^1.68.0",
+    "@vscode/debugprotocol": "^1.68.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "@types/vscode": "^1.110.0",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "2.15.0",
+    "typescript": "^5.8.3"
+  }
+}

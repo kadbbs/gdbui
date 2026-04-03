@@ -1,0 +1,9 @@
+node_modules/
+out/
+*.vsix
+*.log
+.vscode/
+.vscode-test/
+test/
+docs/
+scripts/
