@@ -25,7 +25,7 @@ import { MiAsyncRecord, MiRecord, MiResult, MiTuple, MiValue, parseMiLine } from
 
 interface LaunchRequestArguments extends DebugProtocol.LaunchRequestArguments {
   program: string;
-  gdbPath: string;
+  gdbPath?: string;
   cwd?: string;
   args?: string[];
   stopAtEntry?: boolean;
@@ -115,10 +115,11 @@ export class GdbDebugSession extends LoggingDebugSession {
     args: LaunchRequestArguments
   ): Promise<void> {
     try {
-      this.ensureFile(args.gdbPath, 'gdbPath');
+      const debuggerPath = this.resolveDebuggerPath(args.gdbPath);
+      this.ensureFile(debuggerPath, 'gdbPath');
       this.ensureFile(args.program, 'program');
 
-      this.process = spawn(args.gdbPath, ['--interpreter=mi2', '--quiet'], {
+      this.process = spawn(debuggerPath, ['--interpreter=mi2', '--quiet'], {
         cwd: args.cwd || path.dirname(args.program)
       });
 
@@ -490,6 +491,28 @@ export class GdbDebugSession extends LoggingDebugSession {
     if (!fs.existsSync(filePath)) {
       throw new Error(`${label} does not exist: ${filePath}`);
     }
+  }
+
+  private resolveDebuggerPath(explicitPath?: string): string {
+    if (explicitPath) {
+      return explicitPath;
+    }
+
+    const pathEntries = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+    const executableNames = process.platform === 'win32'
+      ? ['gdb.exe', 'gdb-multiarch.exe']
+      : ['gdb', 'gdb-multiarch'];
+
+    for (const entry of pathEntries) {
+      for (const executableName of executableNames) {
+        const candidate = path.join(entry, executableName);
+        if (fs.existsSync(candidate)) {
+          return candidate;
+        }
+      }
+    }
+
+    throw new Error('No GDB executable was found in PATH. Plain LLDB/lldb-dap is not directly compatible with this adapter yet.');
   }
 
   private waitForPrompt(): Promise<void> {

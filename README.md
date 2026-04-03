@@ -1,12 +1,13 @@
 # GDB UI
 
-GDB UI is a VS Code debugging extension for executable-first native debugging with GDB.
+GDB UI is a VS Code debugging extension for executable-first native debugging with GDB and LLDB.
 
 It is designed for workflows where you want to point directly at an existing binary, debug assembly comfortably, inspect disassembly and memory, and still keep the normal VS Code debugging experience.
 
 ## Highlights
 
-- Launch a debug session with a custom `gdbPath`
+- Launch a debug session with `backend: "auto"`, `backend: "gdb"`, or `backend: "lldb"`
+- Auto-detect `gdb`, `gdb-multiarch`, and `lldb-dap` from the system environment
 - Debug a compiled executable directly
 - Stop at `main` for C/C++ programs and `_start` for assembly programs
 - Step by instruction
@@ -22,12 +23,77 @@ It is designed for workflows where you want to point directly at an existing bin
   "type": "gdbui",
   "request": "launch",
   "name": "Launch with GDB UI",
-  "gdbPath": "/usr/bin/gdb",
+  "backend": "auto",
   "program": "${workspaceFolder}/a.out",
   "cwd": "${workspaceFolder}",
   "args": [],
   "stopAtEntry": true,
   "disassemblyFlavor": "intel"
+}
+```
+
+Auto backend selection uses the binary format and platform to pick a recommended debugger:
+
+- Mach-O on macOS: prefer `lldb-dap`
+- ELF on Linux and other non-macOS platforms: prefer `gdb`
+- If the recommended debugger is not found, the extension falls back to the other supported backend when possible
+
+Debugger auto-discovery looks for:
+
+- `gdb`
+- `gdb-multiarch`
+- `lldb-dap`
+- macOS also tries `xcrun -f lldb-dap`
+
+## Recommended configurations
+
+### C / C++
+
+Use auto detection for the best default per binary and platform:
+
+```json
+{
+  "type": "gdbui",
+  "request": "launch",
+  "name": "Debug C or C++",
+  "backend": "auto",
+  "program": "${workspaceFolder}/a.out",
+  "cwd": "${workspaceFolder}",
+  "stopAtEntry": true
+}
+```
+
+### Assembly
+
+For ELF assembly workflows, prefer GDB explicitly:
+
+```json
+{
+  "type": "gdbui",
+  "request": "launch",
+  "name": "Debug Assembly",
+  "backend": "gdb",
+  "program": "${workspaceFolder}/hello",
+  "cwd": "${workspaceFolder}",
+  "stopAtEntry": true,
+  "disassemblyFlavor": "intel"
+}
+```
+
+### LLDB-first launch
+
+Use this when you want to force LLDB or point to a specific `lldb-dap`:
+
+```json
+{
+  "type": "gdbui",
+  "request": "launch",
+  "name": "Debug with LLDB",
+  "backend": "lldb",
+  "lldbPath": "/path/to/lldb-dap",
+  "program": "${workspaceFolder}/app",
+  "cwd": "${workspaceFolder}",
+  "stopAtEntry": true
 }
 ```
 

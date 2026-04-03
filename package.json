@@ -88,17 +88,30 @@
         "configurationAttributes": {
           "launch": {
             "required": [
-              "program",
-              "gdbPath"
+              "program"
             ],
             "properties": {
               "program": {
                 "type": "string",
                 "description": "Absolute path to the executable to debug."
               },
+              "backend": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "gdb",
+                  "lldb"
+                ],
+                "description": "Debugger backend selection. auto chooses a recommended backend from the binary format and platform.",
+                "default": "auto"
+              },
               "gdbPath": {
                 "type": "string",
-                "description": "Absolute path to the GDB executable from your gdb-tools installation."
+                "description": "Optional absolute path to the GDB executable. If omitted, the extension auto-detects gdb or gdb-multiarch from PATH when GDB is selected."
+              },
+              "lldbPath": {
+                "type": "string",
+                "description": "Optional absolute path to lldb-dap. If omitted, the extension auto-detects lldb-dap from PATH, and on macOS also tries xcrun -f lldb-dap."
               },
               "cwd": {
                 "type": "string",
@@ -134,7 +147,7 @@
             "type": "gdbui",
             "request": "launch",
             "name": "Launch with GDB UI",
-            "gdbPath": "/path/to/gdb-tools/bin/gdb",
+            "backend": "auto",
             "program": "${workspaceFolder}/a.out",
             "cwd": "${workspaceFolder}",
             "args": [],
@@ -150,7 +163,7 @@
               "type": "gdbui",
               "request": "launch",
               "name": "Launch with GDB UI",
-              "gdbPath": "^\"/path/to/gdb-tools/bin/gdb\"",
+              "backend": "auto",
               "program": "^\"${workspaceFolder}/a.out\"",
               "cwd": "^\"${workspaceFolder}\"",
               "args": [],

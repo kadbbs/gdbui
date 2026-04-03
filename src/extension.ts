@@ -1,11 +1,28 @@
 import * as vscode from 'vscode';
-import { DebugAdapterInlineImplementation } from 'vscode';
+import { DebugAdapterExecutable, DebugAdapterInlineImplementation } from 'vscode';
 import { GdbDebugSession } from './gdbDebugSession';
+import { accessSync, constants, readFileSync } from 'fs';
+import { execFileSync } from 'child_process';
+import * as path from 'path';
+
+type DebugBackend = 'auto' | 'gdb' | 'lldb';
+type ResolvedBackend = Exclude<DebugBackend, 'auto'>;
+type BinaryFormat = 'elf' | 'macho' | 'unknown';
+
+interface ResolvedDebugConfiguration extends vscode.DebugConfiguration {
+  backend?: DebugBackend;
+  gdbPath?: string;
+  lldbPath?: string;
+  stopAtEntry?: boolean;
+  stopOnEntry?: boolean;
+  __resolvedBackend?: ResolvedBackend;
+  __resolvedAdapterPath?: string;
+}
 
 class GdbSidebarProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'gdb-ui.sidebar';
   private _view?: vscode.WebviewView;
-  private _gdbPath = '/usr/bin/gdb';
+  private _debuggerPath = '';
   private _programPath = '';
 
   constructor(private readonly _extensionUri: vscode.Uri) {}
@@ -26,8 +43,8 @@ class GdbSidebarProvider implements vscode.WebviewViewProvider {
 
     webviewView.webview.onDidReceiveMessage((message) => {
       switch (message.type) {
-        case 'setGdbPath':
-          this._gdbPath = message.value;
+        case 'setDebuggerPath':
+          this._debuggerPath = message.value;
           break;
         case 'setProgramPath':
           this._programPath = message.value;
@@ -35,8 +52,8 @@ class GdbSidebarProvider implements vscode.WebviewViewProvider {
         case 'browseProgram':
           this._browseProgram();
           break;
-        case 'browseGdb':
-          this._browseGdb();
+        case 'browseDebugger':
+          this._browseDebugger();
           break;
         case 'startDebug':
           this._startDebugging();
@@ -59,16 +76,16 @@ class GdbSidebarProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  private _browseGdb(): void {
+  private _browseDebugger(): void {
     vscode.window.showOpenDialog({
       canSelectFiles: true,
       canSelectFolders: false,
       canSelectMany: false,
-      openLabel: 'Select GDB executable'
+      openLabel: 'Select debugger executable'
     }).then((picked) => {
       if (picked?.[0]) {
-        this._gdbPath = picked[0].fsPath;
-        this._view?.webview.postMessage({ type: 'updateGdb', value: this._gdbPath });
+        this._debuggerPath = picked[0].fsPath;
+        this._view?.webview.postMessage({ type: 'updateDebugger', value: this._debuggerPath });
       }
     });
   }
@@ -79,22 +96,27 @@ class GdbSidebarProvider implements vscode.WebviewViewProvider {
       vscode.window.showErrorMessage('Please select a program to debug');
       return;
     }
-    if (!this._gdbPath) {
-      vscode.window.showErrorMessage('Please select GDB path');
-      return;
-    }
 
-    const config: vscode.DebugConfiguration = {
+    const config: ResolvedDebugConfiguration = {
       type: 'gdbui',
       request: 'launch',
       name: 'GDB UI Debug',
-      gdbPath: this._gdbPath,
+      backend: 'auto',
       program: this._programPath,
       cwd: folder?.uri.fsPath ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
       args: [],
       stopAtEntry: true,
       disassemblyFlavor: 'intel'
     };
+
+    if (this._debuggerPath) {
+      const executableName = path.basename(this._debuggerPath).toLowerCase();
+      if (executableName.includes('lldb')) {
+        config.lldbPath = this._debuggerPath;
+      } else {
+        config.gdbPath = this._debuggerPath;
+      }
+    }
 
     vscode.debug.startDebugging(folder, config);
   }
@@ -165,10 +187,10 @@ class GdbSidebarProvider implements vscode.WebviewViewProvider {
 </head>
 <body>
   <div class="section">
-    <div class="section-title">🔧 GDB Executable</div>
+    <div class="section-title">🔧 Debugger Executable</div>
     <div class="input-row">
-      <input type="text" id="gdbPath" placeholder="/usr/bin/gdb" value="/usr/bin/gdb">
-      <button id="browseGdb" title="Browse">📁</button>
+      <input type="text" id="debuggerPath" placeholder="Optional override: gdb, gdb-multiarch, or lldb-dap">
+      <button id="browseDebugger" title="Browse">📁</button>
     </div>
   </div>
   
@@ -185,16 +207,16 @@ class GdbSidebarProvider implements vscode.WebviewViewProvider {
   <script>
     const vscode = acquireVsCodeApi();
     
-    document.getElementById('gdbPath').addEventListener('change', (e) => {
-      vscode.postMessage({ type: 'setGdbPath', value: e.target.value });
+    document.getElementById('debuggerPath').addEventListener('change', (e) => {
+      vscode.postMessage({ type: 'setDebuggerPath', value: e.target.value });
     });
     
     document.getElementById('programPath').addEventListener('change', (e) => {
       vscode.postMessage({ type: 'setProgramPath', value: e.target.value });
     });
     
-    document.getElementById('browseGdb').addEventListener('click', () => {
-      vscode.postMessage({ type: 'browseGdb' });
+    document.getElementById('browseDebugger').addEventListener('click', () => {
+      vscode.postMessage({ type: 'browseDebugger' });
     });
     
     document.getElementById('browseProgram').addEventListener('click', () => {
@@ -207,8 +229,8 @@ class GdbSidebarProvider implements vscode.WebviewViewProvider {
     
     window.addEventListener('message', (event) => {
       const message = event.data;
-      if (message.type === 'updateGdb') {
-        document.getElementById('gdbPath').value = message.value;
+      if (message.type === 'updateDebugger') {
+        document.getElementById('debuggerPath').value = message.value;
       }
       if (message.type === 'updateProgram') {
         document.getElementById('programPath').value = message.value;
@@ -221,13 +243,195 @@ class GdbSidebarProvider implements vscode.WebviewViewProvider {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+  function detectExecutableInPath(executableNames: string[]): string | undefined {
+    const pathEntries = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+
+    for (const entry of pathEntries) {
+      for (const executableName of executableNames) {
+        const candidate = path.join(entry, executableName);
+        try {
+          accessSync(candidate, constants.X_OK);
+          return candidate;
+        } catch {
+          // Keep scanning PATH entries.
+        }
+      }
+    }
+
+    return undefined;
+  }
+
+  function detectGdbPath(): string | undefined {
+    return detectExecutableInPath(process.platform === 'win32'
+      ? ['gdb.exe', 'gdb-multiarch.exe']
+      : ['gdb', 'gdb-multiarch']);
+  }
+
+  function detectLldbDapPath(): string | undefined {
+    if (process.platform === 'darwin') {
+      try {
+        const xcrunPath = execFileSync('xcrun', ['-f', 'lldb-dap'], { encoding: 'utf8' }).trim();
+        if (xcrunPath) {
+          accessSync(xcrunPath, constants.X_OK);
+          return xcrunPath;
+        }
+      } catch {
+        // Fall back to PATH lookup.
+      }
+    }
+
+    return detectExecutableInPath(process.platform === 'win32'
+      ? ['lldb-dap.exe']
+      : ['lldb-dap']);
+  }
+
+  function detectBinaryFormat(programPath: string): BinaryFormat {
+    try {
+      const header = readFileSync(programPath, { encoding: null }).subarray(0, 4);
+      if (header.length < 4) {
+        return 'unknown';
+      }
+
+      if (header[0] === 0x7f && header[1] === 0x45 && header[2] === 0x4c && header[3] === 0x46) {
+        return 'elf';
+      }
+
+      const machoHeaders = new Set([
+        'feedface',
+        'cefaedfe',
+        'feedfacf',
+        'cffaedfe',
+        'cafebabe',
+        'bebafeca',
+        'cafebabf',
+        'bfbafeca'
+      ]);
+
+      if (machoHeaders.has(header.toString('hex'))) {
+        return 'macho';
+      }
+    } catch {
+      // Fall through to unknown.
+    }
+
+    return 'unknown';
+  }
+
+  function recommendBackend(programPath: string): { backend: ResolvedBackend; reason: string; format: BinaryFormat } {
+    const format = detectBinaryFormat(programPath);
+    if (format === 'macho') {
+      return {
+        backend: 'lldb',
+        format,
+        reason: 'Mach-O binaries are usually best handled by lldb-dap.'
+      };
+    }
+
+    if (format === 'elf') {
+      return {
+        backend: 'gdb',
+        format,
+        reason: 'ELF binaries default to the existing GDB backend.'
+      };
+    }
+
+    if (process.platform === 'darwin') {
+      return {
+        backend: 'lldb',
+        format,
+        reason: 'On macOS, lldb-dap is the recommended default when the binary format is unknown.'
+      };
+    }
+
+    return {
+      backend: 'gdb',
+      format,
+      reason: 'GDB is the recommended default on non-macOS platforms when the binary format is unknown.'
+    };
+  }
+
   async function promptForGdbPath(): Promise<string | undefined> {
     return vscode.window.showInputBox({
       title: 'GDB UI',
-      prompt: 'Enter the absolute path to your gdb executable',
-      placeHolder: '/path/to/gdb-tools/bin/gdb',
+      prompt: 'Enter the absolute path to a GDB executable.',
+      placeHolder: '/path/to/gdb or /path/to/gdb-multiarch',
       ignoreFocusOut: true
     });
+  }
+
+  async function promptForLldbDapPath(): Promise<string | undefined> {
+    return vscode.window.showInputBox({
+      title: 'GDB UI',
+      prompt: 'Enter the absolute path to lldb-dap.',
+      placeHolder: '/path/to/lldb-dap',
+      ignoreFocusOut: true
+    });
+  }
+
+  async function resolveBackend(
+    config: ResolvedDebugConfiguration
+  ): Promise<{ backend: ResolvedBackend; adapterPath: string; reason: string }> {
+    const backend = config.backend ?? 'auto';
+
+    if (backend === 'gdb') {
+      const gdbPath = config.gdbPath || detectGdbPath() || await promptForGdbPath();
+      if (!gdbPath) {
+        return Promise.reject(new Error('No GDB executable was provided or found in PATH.'));
+      }
+      return { backend: 'gdb', adapterPath: gdbPath, reason: 'Using the explicitly selected GDB backend.' };
+    }
+
+    if (backend === 'lldb') {
+      const lldbPath = config.lldbPath || detectLldbDapPath() || await promptForLldbDapPath();
+      if (!lldbPath) {
+        return Promise.reject(new Error('No lldb-dap executable was provided or found in PATH.'));
+      }
+      return { backend: 'lldb', adapterPath: lldbPath, reason: 'Using the explicitly selected LLDB backend.' };
+    }
+
+    const recommendation = recommendBackend(config.program);
+    const recommendedPath = recommendation.backend === 'lldb'
+      ? (config.lldbPath || detectLldbDapPath())
+      : (config.gdbPath || detectGdbPath());
+    if (recommendedPath) {
+      return {
+        backend: recommendation.backend,
+        adapterPath: recommendedPath,
+        reason: recommendation.reason
+      };
+    }
+
+    const fallbackPath = recommendation.backend === 'lldb'
+      ? (config.gdbPath || detectGdbPath())
+      : (config.lldbPath || detectLldbDapPath());
+    if (fallbackPath) {
+      return {
+        backend: recommendation.backend === 'lldb' ? 'gdb' : 'lldb',
+        adapterPath: fallbackPath,
+        reason: `${recommendation.reason} Falling back because the recommended debugger was not found in PATH.`
+      };
+    }
+
+    const choice = await vscode.window.showWarningMessage(
+      'No suitable debugger executable was found in PATH. Select a backend to provide a debugger path manually.',
+      'Use GDB',
+      'Use LLDB'
+    );
+    if (choice === 'Use GDB') {
+      const gdbPath = await promptForGdbPath();
+      if (!gdbPath) {
+        return Promise.reject(new Error('No GDB executable was provided.'));
+      }
+      return { backend: 'gdb', adapterPath: gdbPath, reason: 'Using the manually selected GDB backend.' };
+    }
+    if (choice === 'Use LLDB') {
+      const lldbPath = await promptForLldbDapPath();
+      if (!lldbPath) {
+        return Promise.reject(new Error('No lldb-dap executable was provided.'));
+      }
+      return { backend: 'lldb', adapterPath: lldbPath, reason: 'Using the manually selected LLDB backend.' };
+    }
+    return Promise.reject(new Error('No suitable debugger executable was provided or found in PATH.'));
   }
 
   async function promptForLaunchConfig(folder?: vscode.WorkspaceFolder): Promise<vscode.DebugConfiguration | undefined> {
@@ -241,17 +445,12 @@ export function activate(context: vscode.ExtensionContext): void {
       return undefined;
     }
 
-    const gdbPath = await promptForGdbPath();
-    if (!gdbPath) {
-      return undefined;
-    }
-
     return {
       type: 'gdbui',
       request: 'launch',
       name: `Debug ${vscode.workspace.asRelativePath(programPick[0], false)}`,
       program: programPick[0].fsPath,
-      gdbPath,
+      backend: 'auto',
       cwd: folder?.uri.fsPath ?? vscode.workspace.getWorkspaceFolder(programPick[0])?.uri.fsPath ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
       args: [],
       stopAtEntry: true,
@@ -264,7 +463,7 @@ export function activate(context: vscode.ExtensionContext): void {
       folder: vscode.WorkspaceFolder | undefined,
       config: vscode.DebugConfiguration
     ): Promise<vscode.DebugConfiguration | undefined> {
-      const resolved = { ...config };
+      const resolved = { ...config } as ResolvedDebugConfiguration;
 
       if (!resolved.type && !resolved.request && !resolved.name) {
         resolved.type = 'gdbui';
@@ -275,6 +474,7 @@ export function activate(context: vscode.ExtensionContext): void {
       resolved.type ??= 'gdbui';
       resolved.request ??= 'launch';
       resolved.name ??= 'Launch with GDB UI';
+      resolved.backend ??= 'auto';
       resolved.cwd ??= folder?.uri.fsPath;
       resolved.args ??= [];
       resolved.stopAtEntry ??= true;
@@ -293,12 +493,20 @@ export function activate(context: vscode.ExtensionContext): void {
         };
       }
 
-      if (!resolved.gdbPath) {
-        const gdbPath = await promptForGdbPath();
-        if (!gdbPath) {
-          return undefined;
+      try {
+        const backend = await resolveBackend(resolved);
+        resolved.__resolvedBackend = backend.backend;
+        resolved.__resolvedAdapterPath = backend.adapterPath;
+
+        if (backend.backend === 'gdb') {
+          resolved.gdbPath ??= backend.adapterPath;
+        } else {
+          resolved.lldbPath ??= backend.adapterPath;
+          resolved.stopOnEntry ??= resolved.stopAtEntry;
         }
-        resolved.gdbPath = gdbPath;
+      } catch (error) {
+        vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
+        return undefined;
       }
 
       return resolved;
@@ -330,7 +538,14 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   const factory: vscode.DebugAdapterDescriptorFactory = {
-    createDebugAdapterDescriptor(): vscode.ProviderResult<vscode.DebugAdapterDescriptor> {
+    createDebugAdapterDescriptor(
+      session: vscode.DebugSession
+    ): vscode.ProviderResult<vscode.DebugAdapterDescriptor> {
+      const config = session.configuration as ResolvedDebugConfiguration;
+      if (config.__resolvedBackend === 'lldb' && config.__resolvedAdapterPath) {
+        return new DebugAdapterExecutable(config.__resolvedAdapterPath, []);
+      }
+
       return new DebugAdapterInlineImplementation(new GdbDebugSession());
     }
   };
