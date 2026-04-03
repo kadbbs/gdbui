@@ -57,7 +57,8 @@ npm run package:pre
 
 GitHub Actions are included for:
 
-- multi-platform build and VSIX packaging on Linux, macOS, and Windows
+- multi-platform build and VSIX packaging for Linux, macOS, and Windows
+- target-specific release assets for `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, `win32-x64`, and `win32-arm64`
 - tag-based release publishing for packaged `.vsix` artifacts
 
 Create a version tag like `v0.0.5` to trigger the release workflow and upload the packaged `.vsix` to GitHub Releases.
