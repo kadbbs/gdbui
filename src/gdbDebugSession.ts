@@ -595,6 +595,7 @@ export class GdbDebugSession extends LoggingDebugSession {
 
       const record = parseMiLine(line);
       if (!record) {
+        this.sendEvent(new OutputEvent(`${rawLine}\n`, 'stdout'));
         continue;
       }
 
