@@ -32,11 +32,19 @@ function isLldbDapExecutable(executablePath: string): boolean {
 
 class GdbSidebarProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'gdb-ui.sidebar';
+  public static readonly programStateKey = 'gdb-ui.selectedProgram';
+  public static readonly debuggerStateKey = 'gdb-ui.selectedDebugger';
   private _view?: vscode.WebviewView;
   private _debuggerPath = '';
   private _programPath = '';
 
-  constructor(private readonly _extensionUri: vscode.Uri) {}
+  constructor(
+    private readonly _extensionUri: vscode.Uri,
+    private readonly _workspaceState: vscode.Memento
+  ) {
+    this._debuggerPath = this._workspaceState.get<string>(GdbSidebarProvider.debuggerStateKey, '');
+    this._programPath = this._workspaceState.get<string>(GdbSidebarProvider.programStateKey, '');
+  }
 
   public resolveWebviewView(
     webviewView: vscode.WebviewView,
@@ -51,14 +59,18 @@ class GdbSidebarProvider implements vscode.WebviewViewProvider {
     };
 
     webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
+    void webviewView.webview.postMessage({ type: 'updateDebugger', value: this._debuggerPath });
+    void webviewView.webview.postMessage({ type: 'updateProgram', value: this._programPath });
 
     webviewView.webview.onDidReceiveMessage((message) => {
       switch (message.type) {
         case 'setDebuggerPath':
           this._debuggerPath = message.value;
+          void this._workspaceState.update(GdbSidebarProvider.debuggerStateKey, this._debuggerPath);
           break;
         case 'setProgramPath':
           this._programPath = message.value;
+          void this._workspaceState.update(GdbSidebarProvider.programStateKey, this._programPath);
           break;
         case 'browseProgram':
           this._browseProgram();
@@ -82,6 +94,7 @@ class GdbSidebarProvider implements vscode.WebviewViewProvider {
     }).then((picked) => {
       if (picked?.[0]) {
         this._programPath = picked[0].fsPath;
+        void this._workspaceState.update(GdbSidebarProvider.programStateKey, this._programPath);
         this._view?.webview.postMessage({ type: 'updateProgram', value: this._programPath });
       }
     });
@@ -91,6 +104,7 @@ class GdbSidebarProvider implements vscode.WebviewViewProvider {
     vscode.commands.executeCommand<string>('gdb-ui.pickDebuggerExecutable').then((pickedPath) => {
       if (pickedPath) {
         this._debuggerPath = pickedPath;
+        void this._workspaceState.update(GdbSidebarProvider.debuggerStateKey, this._debuggerPath);
         this._view?.webview.postMessage({ type: 'updateDebugger', value: this._debuggerPath });
       }
     });
@@ -248,6 +262,60 @@ class GdbSidebarProvider implements vscode.WebviewViewProvider {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+  function getSelectedProgramFromState(): string | undefined {
+    return context.workspaceState.get<string>(GdbSidebarProvider.programStateKey);
+  }
+
+  function getSelectedDebuggerFromState(): string | undefined {
+    return context.workspaceState.get<string>(GdbSidebarProvider.debuggerStateKey);
+  }
+
+  async function revealInitialStoppedFrame(session: vscode.DebugSession): Promise<void> {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (vscode.debug.activeDebugSession?.id !== session.id) {
+        return;
+      }
+
+      try {
+        const threads = await session.customRequest('threads');
+        const thread = threads?.threads?.[0];
+        if (!thread?.id) {
+          await delay(250);
+          continue;
+        }
+
+        const stackTrace = await session.customRequest('stackTrace', {
+          threadId: thread.id,
+          startFrame: 0,
+          levels: 1
+        });
+        const topFrame = stackTrace?.stackFrames?.[0];
+        const sourcePath = topFrame?.source?.path;
+        const line = topFrame?.line;
+        if (!sourcePath || typeof line !== 'number' || line < 1) {
+          await delay(250);
+          continue;
+        }
+
+        const document = await vscode.workspace.openTextDocument(sourcePath);
+        const editor = await vscode.window.showTextDocument(document, {
+          preview: false,
+          preserveFocus: false
+        });
+        const position = new vscode.Position(line - 1, 0);
+        editor.selection = new vscode.Selection(position, position);
+        editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
+        return;
+      } catch {
+        await delay(250);
+      }
+    }
+  }
+
+  function delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
   function detectExecutablesInPath(executableNames: string[]): string[] {
     const pathEntries = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
     const discovered = new Set<string>();
@@ -610,6 +678,23 @@ export function activate(context: vscode.ExtensionContext): void {
       resolved.stopAtEntry ??= true;
       resolved.disassemblyFlavor ??= 'intel';
 
+      if (resolved.name === 'GDB UI Debug') {
+        const selectedProgram = getSelectedProgramFromState();
+        if (selectedProgram) {
+          resolved.program = selectedProgram;
+        }
+        const selectedDebugger = getSelectedDebuggerFromState();
+        if (selectedDebugger) {
+          if (isLldbDapExecutable(selectedDebugger)) {
+            resolved.lldbPath = selectedDebugger;
+            delete resolved.gdbPath;
+          } else {
+            resolved.gdbPath = selectedDebugger;
+            delete resolved.lldbPath;
+          }
+        }
+      }
+
       if (!resolved.program) {
         const prompted = await promptForLaunchConfig(folder);
         if (!prompted) {
@@ -687,9 +772,18 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(vscode.debug.registerDebugConfigurationProvider('gdbui', configurationProvider));
   context.subscriptions.push(vscode.debug.registerDebugAdapterDescriptorFactory('gdbui', factory));
+  context.subscriptions.push(
+    vscode.debug.onDidStartDebugSession((session) => {
+      if (session.type !== 'gdbui') {
+        return;
+      }
+
+      void revealInitialStoppedFrame(session);
+    })
+  );
 
   // Register sidebar provider
-  const sidebarProvider = new GdbSidebarProvider(context.extensionUri);
+  const sidebarProvider = new GdbSidebarProvider(context.extensionUri, context.workspaceState);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(GdbSidebarProvider.viewType, sidebarProvider)
   );

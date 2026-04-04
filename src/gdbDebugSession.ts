@@ -629,6 +629,16 @@ export class GdbDebugSession extends LoggingDebugSession {
   }
 
   private handleAsyncRecord(record: MiAsyncRecord): void {
+    if (record.kind === 'notify') {
+      const threadId = Number(stringValue(record.results['thread-id'], String(GdbDebugSession.THREAD_ID)));
+      if (record.class === 'thread-created') {
+        this.sendEvent(new ThreadEvent('started', threadId));
+      } else if (record.class === 'thread-exited') {
+        this.sendEvent(new ThreadEvent('exited', threadId));
+      }
+      return;
+    }
+
     if (record.kind !== 'exec') {
       return;
     }
@@ -653,16 +663,16 @@ export class GdbDebugSession extends LoggingDebugSession {
       return;
     }
 
-    if (reason === 'thread-created') {
-      this.sendEvent(new ThreadEvent('started', threadId));
-      return;
-    }
-
     const event = new StoppedEvent(mapStopReason(reason), threadId) as DebugProtocol.StoppedEvent;
+    event.body = {
+      ...event.body,
+      allThreadsStopped: true,
+      preserveFocusHint: false,
+      hitBreakpointIds: optionalNumber(record.results.bkptno) ? [Number(record.results.bkptno)] : undefined
+    };
     if (frame?.addr) {
       event.body = {
         ...event.body,
-        hitBreakpointIds: optionalNumber(record.results.bkptno) ? [Number(record.results.bkptno)] : undefined,
         description: `${reason} at ${stringValue(frame.addr, '')}`,
         text: frame.func ? `${stringValue(frame.func, '')}` : undefined
       };
