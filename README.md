@@ -123,11 +123,13 @@ npm run package:pre
 
 GitHub Actions are included for:
 
+- universal VSIX packaging for Marketplace publishing
 - multi-platform build and VSIX packaging for Linux, macOS, and Windows
 - target-specific release assets for `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, `win32-x64`, and `win32-arm64`
 - tag-based release publishing for packaged `.vsix` artifacts
+- optional Marketplace publishing from tags with a universal package when `VSCE_PAT` is configured
 
-Create a version tag like `v0.0.5` to trigger the release workflow and upload the packaged `.vsix` to GitHub Releases.
+Create a version tag like `v0.1.1` to trigger the release workflow. GitHub Releases will receive the multi-platform packages, while the Marketplace can receive the universal package.
 
 ## License
 
