@@ -98,7 +98,6 @@ jobs:
   publish-marketplace:
     runs-on: ubuntu-latest
     needs: package-universal
-    if: ${{ secrets.VSCE_PAT != '' }}
 
     steps:
       - name: Checkout
@@ -120,6 +119,7 @@ jobs:
           path: dist/universal
 
       - name: Publish universal VSIX to Marketplace
+        if: ${{ env.VSCE_PAT != '' }}
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: npx @vscode/vsce@2.15.0 publish --packagePath dist/universal/*.vsix
