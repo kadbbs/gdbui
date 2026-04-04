@@ -2,7 +2,7 @@
   "name": "gdb-ui",
   "displayName": "GDB UI",
   "description": "A VS Code debug extension for launching GDB with executable-only and disassembly-first workflows.",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "publisher": "local",
   "icon": "assets/icon.png",
   "repository": {

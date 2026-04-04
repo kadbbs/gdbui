@@ -19,6 +19,11 @@ interface ResolvedDebugConfiguration extends vscode.DebugConfiguration {
   __resolvedAdapterPath?: string;
 }
 
+function isLldbDapExecutable(executablePath: string): boolean {
+  const executableName = path.basename(executablePath).toLowerCase();
+  return executableName === 'lldb-dap' || executableName === 'lldb-dap.exe' || executableName === 'lldb-vscode' || executableName === 'lldb-vscode.exe';
+}
+
 class GdbSidebarProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'gdb-ui.sidebar';
   private _view?: vscode.WebviewView;
@@ -110,8 +115,7 @@ class GdbSidebarProvider implements vscode.WebviewViewProvider {
     };
 
     if (this._debuggerPath) {
-      const executableName = path.basename(this._debuggerPath).toLowerCase();
-      if (executableName.includes('lldb')) {
+      if (isLldbDapExecutable(this._debuggerPath)) {
         config.lldbPath = this._debuggerPath;
       } else {
         config.gdbPath = this._debuggerPath;
@@ -281,8 +285,8 @@ export function activate(context: vscode.ExtensionContext): void {
     }
 
     return detectExecutableInPath(process.platform === 'win32'
-      ? ['lldb-dap.exe']
-      : ['lldb-dap']);
+      ? ['lldb-dap.exe', 'lldb-vscode.exe']
+      : ['lldb-dap', 'lldb-vscode']);
   }
 
   function detectBinaryFormat(programPath: string): BinaryFormat {
@@ -362,7 +366,7 @@ export function activate(context: vscode.ExtensionContext): void {
   async function promptForLldbDapPath(): Promise<string | undefined> {
     return vscode.window.showInputBox({
       title: 'GDB UI',
-      prompt: 'Enter the absolute path to lldb-dap.',
+      prompt: 'Enter the absolute path to lldb-dap. Plain lldb is not a DAP server and is not valid here.',
       placeHolder: '/path/to/lldb-dap',
       ignoreFocusOut: true
     });
@@ -385,6 +389,9 @@ export function activate(context: vscode.ExtensionContext): void {
       const lldbPath = config.lldbPath || detectLldbDapPath() || await promptForLldbDapPath();
       if (!lldbPath) {
         return Promise.reject(new Error('No lldb-dap executable was provided or found in PATH.'));
+      }
+      if (!isLldbDapExecutable(lldbPath)) {
+        return Promise.reject(new Error('The selected LLDB executable is not lldb-dap. Please install or select lldb-dap (or lldb-vscode), not plain lldb.'));
       }
       return { backend: 'lldb', adapterPath: lldbPath, reason: 'Using the explicitly selected LLDB backend.' };
     }
@@ -428,6 +435,9 @@ export function activate(context: vscode.ExtensionContext): void {
       const lldbPath = await promptForLldbDapPath();
       if (!lldbPath) {
         return Promise.reject(new Error('No lldb-dap executable was provided.'));
+      }
+      if (!isLldbDapExecutable(lldbPath)) {
+        return Promise.reject(new Error('The selected LLDB executable is not lldb-dap. Please install or select lldb-dap (or lldb-vscode), not plain lldb.'));
       }
       return { backend: 'lldb', adapterPath: lldbPath, reason: 'Using the manually selected LLDB backend.' };
     }

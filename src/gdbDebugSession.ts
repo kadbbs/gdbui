@@ -305,17 +305,29 @@ export class GdbDebugSession extends LoggingDebugSession {
     }
 
     if (handle.kind === 'locals') {
-      const result = await this.sendMi(`-stack-list-variables --simple-values --frame ${handle.frameId}`);
-      const variables = asList(result.results.variables).map((entry) => {
-        const tuple = asTuple(asResult(entry).value);
-        return {
-          name: stringValue(tuple.name, ''),
-          value: stringValue(tuple.value, '<optimized out>'),
-          variablesReference: 0
-        };
-      });
-      response.body = { variables };
-      this.sendResponse(response);
+      try {
+        await this.sendMi(`-stack-select-frame ${handle.frameId}`);
+        let result = await this.sendMi('-stack-list-variables --simple-values', true);
+        if (result.class !== 'done') {
+          result = await this.sendMi('-stack-list-variables 1');
+        }
+
+        const variables = asList(result.results.variables).map((entry) => {
+          const tuple = asTuple(asResult(entry).value);
+          return {
+            name: stringValue(tuple.name, ''),
+            value: stringValue(tuple.value, '<optimized out>'),
+            variablesReference: 0
+          };
+        });
+        response.body = { variables };
+        this.sendResponse(response);
+      } catch (error) {
+        this.sendErrorResponse(response, {
+          id: 4,
+          format: error instanceof Error ? error.message : String(error)
+        });
+      }
       return;
     }
 
