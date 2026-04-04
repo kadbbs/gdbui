@@ -85,6 +85,9 @@ export class GdbDebugSession extends LoggingDebugSession {
     settled: boolean;
     timeout: NodeJS.Timeout;
   };
+  private consoleCapture?: {
+    buffer: string[];
+  };
 
   public constructor() {
     super('gdb-ui-debug.txt');
@@ -604,6 +607,10 @@ export class GdbDebugSession extends LoggingDebugSession {
       if (record.kind === 'console' || record.kind === 'target' || record.kind === 'log') {
         const category = record.kind === 'target' ? 'stdout' : record.kind === 'console' ? 'console' : 'stderr';
         if (record.text) {
+          if (record.kind === 'console' && this.consoleCapture) {
+            this.consoleCapture.buffer.push(record.text);
+            continue;
+          }
           this.sendEvent(new OutputEvent(record.text, category));
         }
         continue;
@@ -706,16 +713,23 @@ export class GdbDebugSession extends LoggingDebugSession {
   }
 
   private async runToEntryPoint(): Promise<void> {
-    const mainBreakpoint = await this.sendMi('-break-insert -t main', true);
-    if (mainBreakpoint.class === 'done') {
-      await this.sendMi('-exec-run');
-      return;
+    const entryAddress = await this.readEntryAddressFromGdb();
+    if (entryAddress) {
+      const entryBreakpoint = await this.sendMi(`-break-insert -t *${entryAddress}`, true);
+      if (entryBreakpoint.class === 'done') {
+        await this.sendMi('-exec-run');
+        return;
+      }
     }
 
-    const tempEntryBreakpoint = await this.sendMi('-break-insert -t _start', true);
-    if (tempEntryBreakpoint.class === 'done') {
-      await this.sendMi('-exec-run');
-      return;
+    // Fall back to common entry symbols when the binary entry address is unavailable.
+    const entrySymbols = ['main', '_main', '_start', 'start', 'wmain', 'WinMain', 'wWinMain'];
+    for (const entrySymbol of entrySymbols) {
+      const breakpoint = await this.sendMi(`-break-insert -t ${entrySymbol}`, true);
+      if (breakpoint.class === 'done') {
+        await this.sendMi('-exec-run');
+        return;
+      }
     }
 
     const startResult = await this.sendMi('-exec-run --start', true);
@@ -723,7 +737,27 @@ export class GdbDebugSession extends LoggingDebugSession {
       return;
     }
 
-    throw new Error('Failed to stop at entry point. GDB could not find _start or main.');
+    throw new Error('Failed to stop at entry point. GDB could not resolve the binary entry address or a supported entry symbol.');
+  }
+
+  private async readEntryAddressFromGdb(): Promise<string | undefined> {
+    const output = await this.sendConsoleCommand('info files');
+    const match = output.match(/Entry point:\s*(0x[0-9a-fA-F]+)/);
+    return match?.[1];
+  }
+
+  private async sendConsoleCommand(command: string): Promise<string> {
+    if (this.consoleCapture) {
+      throw new Error('A console command is already being captured.');
+    }
+
+    this.consoleCapture = { buffer: [] };
+    try {
+      await this.sendMi(`-interpreter-exec console ${quote(command)}`);
+      return this.consoleCapture.buffer.join('');
+    } finally {
+      this.consoleCapture = undefined;
+    }
   }
 
   private resolveStartupWaiter(): void {
