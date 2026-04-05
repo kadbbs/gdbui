@@ -272,7 +272,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
   async function revealInitialStoppedFrame(session: vscode.DebugSession): Promise<void> {
     for (let attempt = 0; attempt < 20; attempt += 1) {
-      if (vscode.debug.activeDebugSession?.id !== session.id) {
+      const activeSession = vscode.debug.activeDebugSession;
+      if (activeSession && activeSession.id !== session.id) {
         return;
       }
 
@@ -657,6 +658,37 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   const configurationProvider: vscode.DebugConfigurationProvider = {
+    provideDebugConfigurations(
+      folder: vscode.WorkspaceFolder | undefined
+    ): vscode.ProviderResult<vscode.DebugConfiguration[]> {
+      const selectedProgram = getSelectedProgramFromState();
+      const selectedDebugger = getSelectedDebuggerFromState();
+
+      const config: ResolvedDebugConfiguration = {
+        type: 'gdbui',
+        request: 'launch',
+        name: 'GDB UI Debug',
+        backend: 'auto',
+        cwd: folder?.uri.fsPath ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+        args: [],
+        stopAtEntry: true,
+        disassemblyFlavor: 'intel'
+      };
+
+      if (selectedProgram) {
+        config.program = selectedProgram;
+      }
+
+      if (selectedDebugger) {
+        if (isLldbDapExecutable(selectedDebugger)) {
+          config.lldbPath = selectedDebugger;
+        } else {
+          config.gdbPath = selectedDebugger;
+        }
+      }
+
+      return [config];
+    },
     async resolveDebugConfiguration(
       folder: vscode.WorkspaceFolder | undefined,
       config: vscode.DebugConfiguration
@@ -771,6 +803,13 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   context.subscriptions.push(vscode.debug.registerDebugConfigurationProvider('gdbui', configurationProvider));
+  context.subscriptions.push(
+    vscode.debug.registerDebugConfigurationProvider(
+      'gdbui',
+      configurationProvider,
+      vscode.DebugConfigurationProviderTriggerKind.Dynamic
+    )
+  );
   context.subscriptions.push(vscode.debug.registerDebugAdapterDescriptorFactory('gdbui', factory));
   context.subscriptions.push(
     vscode.debug.onDidStartDebugSession((session) => {
