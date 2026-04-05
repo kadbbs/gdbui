@@ -5,6 +5,7 @@ import * as path from 'path';
 import {
   Breakpoint,
   ContinuedEvent,
+  Event as DebugAdapterEvent,
   Handles,
   InitializedEvent,
   InvalidatedEvent,
@@ -56,6 +57,7 @@ interface StackFrameRecord {
   func: string;
   file?: string;
   fullname?: string;
+  from?: string;
   line?: number;
 }
 
@@ -88,7 +90,6 @@ export class GdbDebugSession extends LoggingDebugSession {
   private consoleCapture?: {
     buffer: string[];
   };
-
   public constructor() {
     super('gdb-ui-debug.txt');
 
@@ -118,10 +119,16 @@ export class GdbDebugSession extends LoggingDebugSession {
     args: LaunchRequestArguments
   ): Promise<void> {
     try {
+      logger.log(`launchRequest:start ${JSON.stringify({
+        program: args.program,
+        gdbPath: args.gdbPath,
+        cwd: args.cwd,
+        stopAtEntry: args.stopAtEntry,
+        args: args.args
+      })}`);
       const debuggerPath = this.resolveDebuggerPath(args.gdbPath);
       this.ensureFile(debuggerPath, 'gdbPath');
       this.ensureFile(args.program, 'program');
-
       this.process = spawn(debuggerPath, ['--interpreter=mi2', '--quiet'], {
         cwd: args.cwd || path.dirname(args.program)
       });
@@ -158,9 +165,14 @@ export class GdbDebugSession extends LoggingDebugSession {
       }
 
       this.sendResponse(response);
+      logger.log(`launchRequest:responseSent ${JSON.stringify({
+        program: args.program,
+        debuggerPath
+      })}`);
       if (!this.initialized) {
         this.initialized = true;
         this.sendEvent(new InitializedEvent());
+        logger.log('launchRequest:initializedEventSent');
       }
 
       await this.waitForConfigurationDone();
@@ -171,6 +183,7 @@ export class GdbDebugSession extends LoggingDebugSession {
         await this.sendMi('-exec-run');
       }
     } catch (error) {
+      logger.log(`launchRequest:error ${error instanceof Error ? error.message : String(error)}`);
       this.sendErrorResponse(response, {
         id: 1,
         format: error instanceof Error ? error.message : String(error)
@@ -197,28 +210,46 @@ export class GdbDebugSession extends LoggingDebugSession {
     }
 
     const previous = this.breakpointByPath.get(sourcePath) ?? [];
-    for (const bp of previous) {
-      await this.sendMi(`-break-delete ${bp.id}`);
-    }
+    try {
+      for (const bp of previous) {
+        await this.sendMi(`-break-delete ${bp.id}`, true);
+      }
 
-    const breakpoints: DebugProtocol.Breakpoint[] = [];
-    const nextState: BreakpointInfo[] = [];
-    for (const sourceBreakpoint of args.breakpoints ?? []) {
-      const result = await this.sendMi(`-break-insert ${quote(`${sourcePath}:${sourceBreakpoint.line}`)}`);
-      const bkpt = asTuple(result.results.bkpt);
-      const info: BreakpointInfo = {
-        id: Number(stringValue(bkpt.number, '0')),
-        verified: true,
-        file: sourcePath,
-        line: Number(stringValue(bkpt.line, String(sourceBreakpoint.line)))
-      };
-      nextState.push(info);
-      breakpoints.push(new Breakpoint(true, info.line, 1, new Source(path.basename(sourcePath), sourcePath)));
-    }
+      const breakpoints: DebugProtocol.Breakpoint[] = [];
+      const nextState: BreakpointInfo[] = [];
+      for (const sourceBreakpoint of args.breakpoints ?? []) {
+        try {
+          const result = await this.sendMi(`-break-insert ${quote(`${sourcePath}:${sourceBreakpoint.line}`)}`);
+          const bkpt = asTuple(result.results.bkpt);
+          const info: BreakpointInfo = {
+            id: Number(stringValue(bkpt.number, '0')),
+            verified: true,
+            file: sourcePath,
+            line: Number(stringValue(bkpt.line, String(sourceBreakpoint.line)))
+          };
+          nextState.push(info);
+          breakpoints.push(new Breakpoint(true, info.line, 1, new Source(path.basename(sourcePath), sourcePath)));
+        } catch (error) {
+          breakpoints.push({
+            verified: false,
+            line: sourceBreakpoint.line,
+            column: 1,
+            source: new Source(path.basename(sourcePath), sourcePath),
+            message: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
 
-    this.breakpointByPath.set(sourcePath, nextState);
-    response.body = { breakpoints };
-    this.sendResponse(response);
+      this.breakpointByPath.set(sourcePath, nextState);
+      response.body = { breakpoints };
+      this.sendResponse(response);
+    } catch (error) {
+      this.sendErrorResponse(response, {
+        id: 5,
+        format: error instanceof Error ? error.message : String(error)
+      });
+      return;
+    }
   }
 
   protected async setInstructionBreakpointsRequest(
@@ -250,37 +281,56 @@ export class GdbDebugSession extends LoggingDebugSession {
     response: DebugProtocol.StackTraceResponse,
     _args: DebugProtocol.StackTraceArguments
   ): Promise<void> {
-    const result = await this.sendMi('-stack-list-frames');
-    const stack = asList(result.results.stack).map((entry) => asTuple(asResult(entry).value));
-    this.stackFrames = new Map();
-    const frames = stack.map((item) => {
-      const frame = asTuple(item.frame ?? item);
-      const record: StackFrameRecord = {
-        level: Number(stringValue(frame.level, '0')),
-        addr: stringValue(frame.addr, '0x0'),
-        func: stringValue(frame.func, '<unknown>'),
-        file: optionalString(frame.file),
-        fullname: optionalString(frame.fullname),
-        line: optionalNumber(frame.line)
-      };
-      this.stackFrames.set(record.level, record);
-      const sourcePath = record.fullname || record.file;
-      const stackFrame = new StackFrame(
-        record.level,
-        record.func,
-        sourcePath ? new Source(path.basename(sourcePath), sourcePath) : undefined,
-        record.line ?? 0,
-        1
-      );
-      (stackFrame as DebugProtocol.StackFrame).instructionPointerReference = record.addr;
-      return stackFrame;
-    });
+    try {
+      const result = await this.sendMi('-stack-list-frames');
+      const stack = asList(result.results.stack).map((entry) => asTuple(asResult(entry).value));
+      this.stackFrames = new Map();
+      const frames = stack.map((item) => {
+        const frame = asTuple(item.frame ?? item);
+        const record: StackFrameRecord = {
+          level: Number(stringValue(frame.level, '0')),
+          addr: stringValue(frame.addr, '0x0'),
+          func: stringValue(frame.func, '<unknown>'),
+          file: optionalString(frame.file),
+          fullname: optionalString(frame.fullname),
+          from: optionalString(frame.from),
+          line: optionalNumber(frame.line)
+        };
+        this.stackFrames.set(record.level, record);
+        const sourcePath = record.fullname || record.file;
+        const stackFrame = new StackFrame(
+          record.level,
+          record.func,
+          sourcePath ? new Source(path.basename(sourcePath), sourcePath) : undefined,
+          record.line ?? 0,
+          1
+        );
+        (stackFrame as DebugProtocol.StackFrame).instructionPointerReference = record.addr;
+        return stackFrame;
+      });
 
-    response.body = {
-      stackFrames: frames,
-      totalFrames: frames.length
-    };
-    this.sendResponse(response);
+      response.body = {
+        stackFrames: frames,
+        totalFrames: frames.length
+      };
+      this.sendResponse(response);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.log(`stackTraceRequest:error ${message}`);
+      if (message.includes('No registers.')) {
+        response.body = {
+          stackFrames: [],
+          totalFrames: 0
+        };
+        this.sendResponse(response);
+        return;
+      }
+
+      this.sendErrorResponse(response, {
+        id: 6,
+        format: message
+      });
+    }
   }
 
   protected scopesRequest(
@@ -664,9 +714,15 @@ export class GdbDebugSession extends LoggingDebugSession {
     const reason = stringValue(record.results.reason, 'stop');
     const frame = asOptionalTuple(record.results.frame);
     const threadId = Number(stringValue(record.results['thread-id'], String(GdbDebugSession.THREAD_ID)));
+    logger.log(`handleAsyncRecord:stopped ${JSON.stringify({
+      reason,
+      threadId,
+      frame
+    })}`);
 
     if (reason === 'exited-normally' || reason === 'exited' || reason === 'signal-received' && stringValue(record.results['signal-name'], '') === 'SIGTERM') {
       this.sendEvent(new TerminatedEvent());
+      logger.log(`handleAsyncRecord:terminated ${JSON.stringify({ reason, threadId })}`);
       return;
     }
 
@@ -685,7 +741,11 @@ export class GdbDebugSession extends LoggingDebugSession {
       };
     }
     this.sendEvent(event);
+    logger.log(`handleAsyncRecord:stoppedEventSent ${JSON.stringify(event.body)}`);
+    this.sendEvent(new DebugAdapterEvent('gdbui-stopped'));
+    logger.log('handleAsyncRecord:gdbuiStoppedSent');
     this.sendEvent(new InvalidatedEvent(['stacks', 'threads', 'variables']));
+    logger.log('handleAsyncRecord:invalidatedSent');
   }
 
   private sendMi(command: string, allowError = false): Promise<MiResultRecordLike> {
@@ -713,16 +773,6 @@ export class GdbDebugSession extends LoggingDebugSession {
   }
 
   private async runToEntryPoint(): Promise<void> {
-    const entryAddress = await this.readEntryAddressFromGdb();
-    if (entryAddress) {
-      const entryBreakpoint = await this.sendMi(`-break-insert -t *${entryAddress}`, true);
-      if (entryBreakpoint.class === 'done') {
-        await this.sendMi('-exec-run');
-        return;
-      }
-    }
-
-    // Fall back to common entry symbols when the binary entry address is unavailable.
     const entrySymbols = ['main', '_main', '_start', 'start', 'wmain', 'WinMain', 'wWinMain'];
     for (const entrySymbol of entrySymbols) {
       const breakpoint = await this.sendMi(`-break-insert -t ${entrySymbol}`, true);
@@ -737,27 +787,7 @@ export class GdbDebugSession extends LoggingDebugSession {
       return;
     }
 
-    throw new Error('Failed to stop at entry point. GDB could not resolve the binary entry address or a supported entry symbol.');
-  }
-
-  private async readEntryAddressFromGdb(): Promise<string | undefined> {
-    const output = await this.sendConsoleCommand('info files');
-    const match = output.match(/Entry point:\s*(0x[0-9a-fA-F]+)/);
-    return match?.[1];
-  }
-
-  private async sendConsoleCommand(command: string): Promise<string> {
-    if (this.consoleCapture) {
-      throw new Error('A console command is already being captured.');
-    }
-
-    this.consoleCapture = { buffer: [] };
-    try {
-      await this.sendMi(`-interpreter-exec console ${quote(command)}`);
-      return this.consoleCapture.buffer.join('');
-    } finally {
-      this.consoleCapture = undefined;
-    }
+    throw new Error('Failed to stop at entry point. GDB could not resolve a supported entry symbol.');
   }
 
   private resolveStartupWaiter(): void {

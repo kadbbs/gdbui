@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { DebugAdapterExecutable, DebugAdapterInlineImplementation } from 'vscode';
 import { GdbDebugSession } from './gdbDebugSession';
-import { accessSync, constants, readFileSync } from 'fs';
+import { accessSync, constants, existsSync, readFileSync } from 'fs';
 import { execFileSync } from 'child_process';
 import * as path from 'path';
 
@@ -28,6 +28,15 @@ interface ResolvedDebugConfiguration extends vscode.DebugConfiguration {
 function isLldbDapExecutable(executablePath: string): boolean {
   const executableName = path.basename(executablePath).toLowerCase();
   return executableName === 'lldb-dap' || executableName === 'lldb-dap.exe' || executableName === 'lldb-vscode' || executableName === 'lldb-vscode.exe';
+}
+
+let outputChannel: vscode.OutputChannel | undefined;
+
+function logExtension(message: string, details?: Record<string, unknown>): void {
+  const suffix = details ? ` ${JSON.stringify(details)}` : '';
+  const line = `[gdb-ui] ${message}${suffix}`;
+  console.log(line);
+  outputChannel?.appendLine(line);
 }
 
 class GdbSidebarProvider implements vscode.WebviewViewProvider {
@@ -262,6 +271,14 @@ class GdbSidebarProvider implements vscode.WebviewViewProvider {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+  outputChannel = vscode.window.createOutputChannel('GDB UI');
+  context.subscriptions.push(outputChannel);
+  const pendingRevealTimers = new Map<string, NodeJS.Timeout>();
+
+  function getWorkspaceRoot(): string | undefined {
+    return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  }
+
   function getSelectedProgramFromState(): string | undefined {
     return context.workspaceState.get<string>(GdbSidebarProvider.programStateKey);
   }
@@ -270,15 +287,46 @@ export function activate(context: vscode.ExtensionContext): void {
     return context.workspaceState.get<string>(GdbSidebarProvider.debuggerStateKey);
   }
 
-  async function revealInitialStoppedFrame(session: vscode.DebugSession): Promise<void> {
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      const activeSession = vscode.debug.activeDebugSession;
-      if (activeSession && activeSession.id !== session.id) {
-        return;
-      }
+  function isPathUsableForWorkspace(candidatePath: string | undefined): boolean {
+    if (!candidatePath || !existsSync(candidatePath)) {
+      return false;
+    }
 
+    const workspaceRoot = getWorkspaceRoot();
+    if (!workspaceRoot) {
+      return true;
+    }
+
+    const normalizedRoot = path.resolve(workspaceRoot) + path.sep;
+    const normalizedCandidate = path.resolve(candidatePath);
+    return normalizedCandidate === path.resolve(workspaceRoot) || normalizedCandidate.startsWith(normalizedRoot);
+  }
+
+  async function sanitizeStoredSelections(): Promise<void> {
+    const selectedProgram = getSelectedProgramFromState();
+    if (selectedProgram && !isPathUsableForWorkspace(selectedProgram)) {
+      await context.workspaceState.update(GdbSidebarProvider.programStateKey, '');
+    }
+
+    const selectedDebugger = getSelectedDebuggerFromState();
+    if (selectedDebugger && !existsSync(selectedDebugger)) {
+      await context.workspaceState.update(GdbSidebarProvider.debuggerStateKey, '');
+    }
+  }
+
+  async function revealInitialStoppedFrame(session: vscode.DebugSession): Promise<void> {
+    logExtension('revealInitialStoppedFrame:start', {
+      sessionId: session.id,
+      sessionName: session.name
+    });
+    for (let attempt = 0; attempt < 20; attempt += 1) {
       try {
         const threads = await session.customRequest('threads');
+        logExtension('revealInitialStoppedFrame:threads', {
+          sessionId: session.id,
+          attempt,
+          threads
+        });
         const thread = threads?.threads?.[0];
         if (!thread?.id) {
           await delay(250);
@@ -290,10 +338,20 @@ export function activate(context: vscode.ExtensionContext): void {
           startFrame: 0,
           levels: 1
         });
+        logExtension('revealInitialStoppedFrame:stackTrace', {
+          sessionId: session.id,
+          attempt,
+          stackTrace
+        });
         const topFrame = stackTrace?.stackFrames?.[0];
         const sourcePath = topFrame?.source?.path;
         const line = topFrame?.line;
         if (!sourcePath || typeof line !== 'number' || line < 1) {
+          logExtension('revealInitialStoppedFrame:noSource', {
+            sessionId: session.id,
+            attempt,
+            topFrame
+          });
           await delay(250);
           continue;
         }
@@ -306,11 +364,46 @@ export function activate(context: vscode.ExtensionContext): void {
         const position = new vscode.Position(line - 1, 0);
         editor.selection = new vscode.Selection(position, position);
         editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
+        logExtension('revealInitialStoppedFrame:revealed', {
+          sessionId: session.id,
+          attempt,
+          sourcePath,
+          line
+        });
         return;
-      } catch {
+      } catch (error) {
+        logExtension('revealInitialStoppedFrame:error', {
+          sessionId: session.id,
+          attempt,
+          error: error instanceof Error ? error.message : String(error)
+        });
         await delay(250);
       }
     }
+    logExtension('revealInitialStoppedFrame:gaveUp', {
+      sessionId: session.id
+    });
+  }
+
+  function scheduleStoppedFrameReveal(session: vscode.DebugSession, delayMs = 150): void {
+    const existing = pendingRevealTimers.get(session.id);
+    if (existing) {
+      clearTimeout(existing);
+    }
+
+    const timeout = setTimeout(() => {
+      pendingRevealTimers.delete(session.id);
+      logExtension('scheduleStoppedFrameReveal:fire', {
+        sessionId: session.id,
+        delayMs
+      });
+      void revealInitialStoppedFrame(session);
+    }, delayMs);
+    pendingRevealTimers.set(session.id, timeout);
+    logExtension('scheduleStoppedFrameReveal:set', {
+      sessionId: session.id,
+      delayMs
+    });
   }
 
   function delay(ms: number): Promise<void> {
@@ -687,6 +780,12 @@ export function activate(context: vscode.ExtensionContext): void {
         }
       }
 
+      logExtension('provideDebugConfigurations', {
+        folder: folder?.uri.fsPath,
+        selectedProgram,
+        selectedDebugger,
+        config
+      });
       return [config];
     },
     async resolveDebugConfiguration(
@@ -752,10 +851,19 @@ export function activate(context: vscode.ExtensionContext): void {
           resolved.stopOnEntry ??= resolved.stopAtEntry;
         }
       } catch (error) {
+        logExtension('resolveDebugConfiguration:error', {
+          folder: folder?.uri.fsPath,
+          config: resolved,
+          error: error instanceof Error ? error.message : String(error)
+        });
         vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
         return undefined;
       }
 
+      logExtension('resolveDebugConfiguration:resolved', {
+        folder: folder?.uri.fsPath,
+        config: resolved
+      });
       return resolved;
     }
   };
@@ -786,6 +894,10 @@ export function activate(context: vscode.ExtensionContext): void {
       }
 
       await vscode.debug.startDebugging(folder, config);
+      logExtension('startDebuggingExecutable:started', {
+        folder: folder?.uri.fsPath,
+        config
+      });
     })
   );
 
@@ -817,9 +929,44 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
 
-      void revealInitialStoppedFrame(session);
+      logExtension('onDidStartDebugSession', {
+        sessionId: session.id,
+        sessionName: session.name,
+        configuration: session.configuration
+      });
     })
   );
+  context.subscriptions.push(
+    vscode.debug.onDidReceiveDebugSessionCustomEvent((event) => {
+      if (event.session.type !== 'gdbui') {
+        return;
+      }
+
+      logExtension('onDidReceiveDebugSessionCustomEvent', {
+        sessionId: event.session.id,
+        event: event.event,
+        body: event.body
+      });
+      if (event.event === 'gdbui-stopped') {
+        scheduleStoppedFrameReveal(event.session, 50);
+      }
+    })
+  );
+  context.subscriptions.push(
+    vscode.debug.onDidTerminateDebugSession((session) => {
+      logExtension('onDidTerminateDebugSession', {
+        sessionId: session.id,
+        sessionName: session.name
+      });
+      const existing = pendingRevealTimers.get(session.id);
+      if (existing) {
+        clearTimeout(existing);
+        pendingRevealTimers.delete(session.id);
+      }
+    })
+  );
+
+  void sanitizeStoredSelections();
 
   // Register sidebar provider
   const sidebarProvider = new GdbSidebarProvider(context.extensionUri, context.workspaceState);

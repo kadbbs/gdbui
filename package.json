@@ -2,7 +2,7 @@
   "name": "gdb-ui",
   "displayName": "GDB UI",
   "description": "A VS Code debug extension for launching GDB with executable-only and disassembly-first workflows.",
-  "version": "0.1.12",
+  "version": "1.0.0",
   "publisher": "kadbbs",
   "icon": "assets/icon.png",
   "repository": {
@@ -29,12 +29,24 @@
   "activationEvents": [
     "onView:gdb-ui.sidebar",
     "onDebug",
+    "onDebugDynamicConfigurations:gdbui",
     "onDebugResolve:gdbui",
     "onCommand:gdb-ui.startDebuggingExecutable",
     "onCommand:gdb-ui.debugFromSidebar"
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "breakpoints": [
+      {
+        "language": "asm"
+      },
+      {
+        "language": "c"
+      },
+      {
+        "language": "cpp"
+      }
+    ],
     "languages": [
       {
         "id": "asm",
